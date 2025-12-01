@@ -1,0 +1,130 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ------------------------
+// CONFIGURE THIS PART
+// ------------------------
+const char* ssid = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+
+// Cape Town coordinates MY LAT & LON
+const String LAT = "-33.925";
+const String LON = "18.4241";
+
+// Open-Meteo API URL
+String url =
+  "https://api.open-meteo.com/v1/forecast?latitude=" + LAT +
+  "&longitude=" + LON +
+  "&current=temperature_2m,relative_humidity_2m,uv_index,shortwave_radiation";
+
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 300000;  // 5 minutes
+
+// ------------------------
+
+void setup() {
+  Serial.begin(115200);
+
+  // I2C INIT
+  Wire.begin(7, 6);  // SDA=7, SCL=6
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  showMessage("Connecting WiFi...");
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    showMessage("WiFi Connecting...");
+  }
+
+  showMessage("WiFi Connected!");
+  delay(1000);
+
+  fetchAndDisplay();
+}
+
+void loop() {
+  if (millis() - lastUpdate > updateInterval) {
+    fetchAndDisplay();
+  }
+}
+
+void showMessage(String msg) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.println(msg);
+  display.display();
+}
+
+void fetchAndDisplay() {
+  lastUpdate = millis();
+  showMessage("Updating...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    showMessage("Reconnecting WiFi...");
+    WiFi.reconnect();
+    delay(2000);
+  }
+
+  HTTPClient http;
+  http.begin(url);
+
+  int httpCode = http.GET();
+  if (httpCode != 200) {
+    showMessage("HTTP Error!");
+    http.end();
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  // Parse JSON
+  DynamicJsonDocument doc(2048);
+  deserializeJson(doc, payload);
+
+  float temp = doc["current"]["temperature_2m"];
+  float hum  = doc["current"]["relative_humidity_2m"];
+  float uv   = doc["current"]["uv_index"];
+  float rad  = doc["current"]["shortwave_radiation"]; // W/m²
+
+  // Display on OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("  SOLAR WEATHER");
+
+  display.setCursor(0, 16);
+  display.print("Radiation: ");
+  display.print(rad);
+  display.println(" W/m2");
+
+  display.setCursor(0, 28);
+  display.print("UV Index: ");
+  display.println(uv);
+
+  display.setCursor(0, 40);
+  display.print("Temp: ");
+  display.print(temp);
+  display.println(" C");
+
+  display.setCursor(0, 52);
+  display.print("Humidity: ");
+  display.print(hum);
+  display.println("%");
+
+  display.display();
+}
