@@ -1,0 +1,233 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <time.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ------------------------
+// CONFIGURE THIS PART
+// ------------------------
+const char* ssid = "YOUR_SSID";
+const char* password = "YOURPASSWORD";
+
+// Cape Town coordinates
+const String LAT = "-33.925";
+const String LON = "18.4241";
+
+String url =
+  "https://api.open-meteo.com/v1/forecast?latitude=" + LAT +
+  "&longitude=" + LON +
+  "&hourly=temperature_2m,relative_humidity_2m,uv_index,shortwave_radiation" +
+  "&timezone=auto";
+
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 300000;  // 5 minutes
+
+// ------------------------
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize NTP
+  configTime(7200, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.println("Waiting for NTP time...");
+  delay(2000);
+
+  Wire.begin(7, 6);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  showMessage("Connecting WiFi...");
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    showMessage("WiFi Connecting...");
+  }
+
+  showMessage("WiFi Connected!");
+  delay(1000);
+
+  fetchAndDisplay();
+}
+
+void loop() {
+  if (millis() - lastUpdate > updateInterval) {
+    fetchAndDisplay();
+  }
+}
+
+void showMessage(String msg) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.println(msg);
+  display.display();
+}
+
+int getCurrentHour() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return 9;
+  }
+  int hour = timeinfo.tm_hour;
+  Serial.print("Current hour: ");
+  Serial.println(hour);
+  return hour;
+}
+
+void fetchAndDisplay() {
+  lastUpdate = millis();
+  showMessage("Updating...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    showMessage("Reconnecting WiFi...");
+    WiFi.reconnect();
+    delay(2000);
+  }
+
+  HTTPClient http;
+  http.begin(url);
+
+  int httpCode = http.GET();
+  if (httpCode != 200) {
+    showMessage("HTTP Error!");
+    Serial.print("HTTP Error: ");
+    Serial.println(httpCode);
+    http.end();
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  // Parse JSON
+  DynamicJsonDocument doc(16384);
+  DeserializationError error = deserializeJson(doc, payload);
+  
+  if (error) {
+    showMessage("JSON Parse Error!");
+    Serial.print("JSON Error: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  // Get the current hour
+  int currentHour = getCurrentHour();
+  
+  // Get the time array
+  JsonArray times = doc["hourly"]["time"].as<JsonArray>();
+  
+  // Find the index for current hour
+  int currentIndex = -1;
+  String currentTimeStr;
+  
+  for (int i = 0; i < times.size(); i++) {
+    String timeStr = times[i].as<String>();
+    if (timeStr.length() >= 16) {
+      int hour = timeStr.substring(11, 13).toInt();
+      if (hour == currentHour) {
+        currentIndex = i;
+        currentTimeStr = timeStr;
+        break;
+      }
+    }
+  }
+  
+  if (currentIndex == -1) {
+    Serial.println("Could not find current hour, using index 9 (09:00)");
+    currentIndex = 9;
+    currentTimeStr = times[9].as<String>();
+  }
+  
+  // FIXED: Use as<float>() directly without the | operator
+  JsonArray tempArray = doc["hourly"]["temperature_2m"].as<JsonArray>();
+  JsonArray humArray = doc["hourly"]["relative_humidity_2m"].as<JsonArray>();
+  JsonArray uvArray = doc["hourly"]["uv_index"].as<JsonArray>();
+  JsonArray radArray = doc["hourly"]["shortwave_radiation"].as<JsonArray>();
+  
+  // Get values using as<float>() - this is the key fix
+  float temp = tempArray[currentIndex].as<float>();
+  float hum = humArray[currentIndex].as<float>();
+  float uv = uvArray[currentIndex].as<float>();
+  float rad = radArray[currentIndex].as<float>();
+
+  // Debug output
+  Serial.println("\n=== Debug Info ===");
+  Serial.print("Current hour: ");
+  Serial.println(currentHour);
+  Serial.print("Using index: ");
+  Serial.println(currentIndex);
+  Serial.print("Time: ");
+  Serial.println(currentTimeStr);
+  Serial.print("Temperature: ");
+  Serial.println(temp);
+  Serial.print("Humidity: ");
+  Serial.println(hum);
+  Serial.print("UV Index: ");
+  Serial.println(uv);
+  Serial.print("Radiation: ");
+  Serial.println(rad);
+
+  // Display on OLED
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("  SOLAR WEATHER");
+  
+  // Show time
+  display.setCursor(0, 10);
+  display.print("Time: ");
+  if (currentTimeStr.length() > 0) {
+    display.println(currentTimeStr.substring(11, 16));
+  } else {
+    display.println("--:--");
+  }
+
+  display.setCursor(0, 22);
+  display.print("Radiation: ");
+  if (rad >= 0 && rad < 10000) {
+    display.print(rad, 0);
+    display.println(" W/m2");
+  } else {
+    display.println("N/A");
+  }
+
+  display.setCursor(0, 34);
+  display.print("UV Index: ");
+  if (uv >= 0 && uv < 20) {
+    display.println(uv, 1);
+  } else {
+    display.println("N/A");
+  }
+
+  display.setCursor(0, 46);
+  display.print("Temp: ");
+  if (temp > -50 && temp < 100) {
+    display.print(temp, 1);
+    display.println(" C");
+  } else {
+    display.println("N/A");
+  }
+
+  display.setCursor(0, 58);
+  display.print("Humidity: ");
+  if (hum >= 0 && hum <= 100) {
+    display.print(hum, 0);
+    display.println("%");
+  } else {
+    display.println("N/A");
+  }
+
+  display.display();
+}
